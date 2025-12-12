@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Fake Lock + Jump Scare — Ankit Prank</title>
+<style>
+  :root{
+    --bg:#000; --panel:#070707; --accent:#ff3b30; --muted:#9aa0a6;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);color:#fff;font-family:Inter,system-ui,Segoe UI,Roboto,Arial;overflow:hidden;-webkit-user-select:none;user-select:none}
+  /* Lock UI */
+  .lockwrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;z-index:40}
+  .card{width:100%;max-width:520px;border-radius:18px;padding:22px;background:linear-gradient(180deg,var(--panel),#050505);box-shadow:0 30px 60px rgba(0,0,0,0.7);text-align:center;backdrop-filter:blur(6px)}
+  .title{font-weight:800;font-size:20px;color:var(--accent);margin-bottom:6px}
+  .desc{color:var(--muted);font-size:14px;margin-bottom:12px}
+  .count{font-family:monospace;font-size:48px;margin:8px 0}
+  .hint{font-size:13px;color:var(--muted);margin-bottom:14px}
+  .hold-btn{display:inline-block;padding:12px 20px;border-radius:12px;border:2px solid rgba(255,255,255,0.06);background:rgba(255,255,255,0.02);cursor:pointer;font-weight:700}
+  .hold-btn:active{transform:scale(.98)}
+  /* capture overlay so underlying page cannot be used */
+  .capture{position:fixed;inset:0;z-index:45}
+  /* Scare screen */
+  #scareScreen{position:fixed;inset:0;background:#000;display:flex;align-items:center;justify-content:center;opacity:0;transition:opacity .06s;z-index:60}
+  #scareScreen.show{opacity:1}
+  #scareImg{width:100vw;height:100vh;object-fit:cover}
+  /* Reveal */
+  #reveal{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;background:rgba(0,0,0,.95);color:#fff;opacity:0;pointer-events:none;transition:.4s;z-index:70}
+  #reveal.show{opacity:1;pointer-events:auto}
+  .revealBox{max-width:520px;padding:22px;border-radius:14px;background:linear-gradient(180deg,#081,#012);text-align:center}
+  .reveal h2{color:#dfffbf;margin:0 0 8px}
+  .btn{padding:10px 18px;border-radius:10px;border:2px solid rgba(255,255,255,0.12);background:transparent;color:#fff;cursor:pointer}
+  /* small */
+  @media (max-width:420px){ .count{font-size:36px} .card{padding:16px;border-radius:12px} }
+</style>
+</head>
+<body>
+
+<!-- LOCK UI -->
+<div class="lockwrap" id="lockwrap" role="dialog" aria-labelledby="lockTitle" aria-describedby="lockDesc">
+  <div class="card">
+    <div class="title" id="lockTitle">Security Lock Engaged</div>
+    <div class="desc" id="lockDesc">Unusual activity detected. Device temporarily locked to protect data.</div>
+    <div class="count" id="countDisplay">00:09</div>
+    <div class="hint">Hold the button below for <strong>3 seconds</strong> to unlock early (or wait).</div>
+    <button id="holdBtn" class="hold-btn" aria-pressed="false">HOLD TO UNLOCK</button>
+  </div>
+</div>
+
+<!-- Invisible overlay capturing all touches -->
+<div class="capture" id="capture"></div>
+
+<!-- Scare screen (full-screen image) -->
+<div id="scareScreen" aria-hidden="true">
+  <!-- Replace src with your scary image link -->
+  <img id="scareImg" src="https://i.imgur.com/dYfZ5ZQ.png" alt="scare">
+</div>
+
+<!-- Reveal -->
+<div id="reveal" aria-hidden="true">
+  <div class="revealBox">
+    <h2>Relax — Prank by Ankit 😈</h2>
+    <p style="opacity:.9">This was just for fun. Tap below to return.</p>
+    <div style="height:12px"></div>
+    <button id="backBtn" class="btn">Back to page</button>
+  </div>
+</div>
+
+<script>
+/* ===== CONFIG ===== */
+const LOCK_SECONDS = 9;   // set how long the lock/countdown is BEFORE scare triggers
+const HOLD_REQUIRED_MS = 3000; // hold time to unlock early
+const LAUGH_DURATION = 9; // seconds of laugh (keeps same as lock seconds for sync)
+const SILENT_WAV = "data:audio/wav;base64,UklGRjQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
+
+/* ===== ELEMENTS ===== */
+const countEl = document.getElementById('countDisplay');
+const holdBtn = document.getElementById('holdBtn');
+const capture = document.getElementById('capture');
+const scareScreen = document.getElementById('scareScreen');
+const reveal = document.getElementById('reveal');
+const backBtn = document.getElementById('backBtn');
+
+/* ===== STATE ===== */
+let remaining = LOCK_SECONDS;
+let countdownTimer = null;
+let holdTimer = null;
+let holdElapsed = 0;
+let started = false;
+let audioCtx = null;
+let screamRunning = false;
+
+/* Prevent back navigation from easily escaping */
+try {
+  history.pushState({prank: true}, '', location.href);
+  window.addEventListener('popstate', ()=> { history.pushState({prank: true}, '', location.href); });
+} catch(e){}
+
+/* Format mm:ss */
+function fmt(s){ const mm = Math.floor(s/60); const ss = s%60; return String(mm).padStart(2,'0') + ':' + String(ss).padStart(2,'0'); }
+function updateDisplay(){ countEl.textContent = fmt(remaining); }
+
+/* Simple audio unlock: play a tiny silent audio to unlock policy */
+async function unlockAudioElement(){
+  try {
+    const a = new Audio(SILENT_WAV);
+    await a.play().catch(()=>{});
+    try { a.pause(); a.currentTime = 0; } catch(e){}
+    return true;
+  } catch(e){ return false; }
+}
+async function ensureAudioContext(){
+  if(!audioCtx){
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch(e){ audioCtx = null; }
+  }
+  if(audioCtx && audioCtx.state === 'suspended'){
+    try { await audioCtx.resume(); } catch(e){}
+  }
+  return !!audioCtx;
+}
+
+/* Combined unlock attempt */
+async function unlockAudio(){
+  // try element first
+  await unlockAudioElement().catch(()=>{});
+  // then create/resume audio context
+  await ensureAudioContext().catch(()=>{});
+}
+
+/* Play 9s evil laugh: oscillator + tremolo + distortion */
+function playEvilLaugh(durationSec = LAUGH_DURATION){
+  if(!audioCtx) {
+    // try to create
+    if(!ensureAudioContext()) return;
+  }
+  const now = audioCtx.currentTime;
+  // two oscillators for body
+  const o1 = audioCtx.createOscillator();
+  const o2 = audioCtx.createOscillator();
+  o1.type = 'sawtooth';
+  o2.type = 'square';
+  o1.frequency.setValueAtTime(150, now);
+  o2.frequency.setValueAtTime(80, now);
+
+  // tremolo (rapid amplitude pulsing for HA-HA)
+  const trem = audioCtx.createGain();
+  const tremOsc = audioCtx.createOscillator();
+  tremOsc.type = 'sine';
+  tremOsc.frequency.setValueAtTime(5.5, now); // 5-7hz gives 'ha-ha' rhythm
+  tremOsc.connect(trem.gain);
+  trem.gain.setValueAtTime(0.8, now);
+  tremOsc.start(now);
+
+  // distortion
+  const sh = audioCtx.createWaveShaper();
+  const curL = 16384;
+  const curve = new Float32Array(curL);
+  for(let i=0;i<curL;i++){ const x = (i/(curL-1))*2 - 1; curve[i] = Math.tanh(x * 6); }
+  sh.curve = curve;
+
+  // filter for character
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.frequency.setValueAtTime(900, now);
+  filter.Q.setValueAtTime(0.7, now);
+
+  // master gain
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.0001, now);
+  g.gain.linearRampToValueAtTime(0.95, now + 0.08);
+  g.gain.linearRampToValueAtTime(0.0001, now + durationSec);
+
+  // connect graph
+  o1.connect(sh); o2.connect(sh);
+  sh.connect(filter);
+  filter.connect(trem);
+  trem.connect(g);
+  g.connect(audioCtx.destination);
+
+  // start/stop
+  o1.start(now); o2.start(now);
+  o1.stop(now + durationSec + 0.05); o2.stop(now + durationSec + 0.05);
+  tremOsc.stop(now + durationSec + 0.05);
+
+  // cleanup scheduled disconnects
+  setTimeout(()=> {
+    try{ o1.disconnect(); }catch(e){}
+    try{ o2.disconnect(); }catch(e){}
+    try{ tremOsc.disconnect(); }catch(e){}
+    try{ sh.disconnect(); }catch(e){}
+    try{ filter.disconnect(); }catch(e){}
+    try{ g.disconnect(); }catch(e){}
+  }, (durationSec + 0.6)*1000);
+
+  // mark running
+  screamRunning = true;
+  setTimeout(()=> screamRunning = false, durationSec*1000 + 200);
+}
+
+/* Start countdown and capture */
+function startLockFlow(){
+  if(started) return;
+  started = true;
+  updateDisplay();
+  countdownTimer = setInterval(()=> {
+    remaining--;
+    updateDisplay();
+    if(remaining <= 0){
+      clearInterval(countdownTimer);
+      triggerScare();
+    }
+  }, 1000);
+  // small vibration on start
+  if(navigator.vibrate) { try{ navigator.vibrate([140,80,140]); } catch(e){} }
+}
+
+/* Trigger the jump-scare: show image, play laugh, then reveal */
+async function triggerScare(){
+  // ensure audio unlocked/resumed
+  await unlockAudio().catch(()=>{});
+  // show the scary image
+  const sc = document.getElementById('scareScreen');
+  sc.classList.add('show');
+  // vibrate short burst
+  if(navigator.vibrate) { try{ navigator.vibrate([200,100,200]); } catch(e){} }
+  // play laugh (if audio context available)
+  try { if(!audioCtx) await ensureAudioContext(); } catch(e){}
+  if(audioCtx) {
+    playEvilLaugh(LAUGH_DURATION);
+  } else {
+    // if no WebAudio, fallback try playing a loud short beep via audio element (best-effort)
+    try {
+      const a = new Audio(SILENT_WAV); // silent fallback: not ideal
+      a.play().catch(()=>{});
+    } catch(e){}
+  }
+  // after laugh duration, hide scare and show reveal
+  setTimeout(()=> {
+    sc.classList.remove('show');
+    showReveal();
+  }, LAUGH_DURATION * 1000);
+}
+
+/* Reveal UI */
+function showReveal(){
+  capture.style.display = 'none';
+  document.getElementById('reveal').classList.add('show');
+  // small success beep using WebAudio (safe)
+  try {
+    if(!audioCtx) ensureAudioContext();
+    if(audioCtx){
+      const now = audioCtx.currentTime;
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sine'; o.frequency.value = 440;
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.linearRampToValueAtTime(0.12, now + 0.01);
+      g.gain.linearRampToValueAtTime(0.0001, now + 0.14);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(now); o.stop(now + 0.14);
+      setTimeout(()=>{ try{ o.disconnect(); g.disconnect(); }catch(e){} }, 400);
+    }
+  } catch(e){}
+}
+
+/* Hold-to-unlock logic */
+function beginHold(e){
+  e.preventDefault && e.preventDefault();
+  if(holdTimer) return;
+  holdElapsed = 0;
+  holdBtn.setAttribute('aria-pressed','true');
+  const step = 100;
+  holdTimer = setInterval(()=>{
+    holdElapsed += step;
+    const pct = Math.min(1, holdElapsed / HOLD_REQUIRED_MS);
+    holdBtn.style.opacity = 0.85 - pct*0.45;
+    if(holdElapsed >= HOLD_REQUIRED_MS){
+      clearInterval(holdTimer); holdTimer = null;
+      // cancel countdown and trigger reveal without scare
+      clearInterval(countdownTimer);
+      showReveal();
+    }
+  }, step);
+}
+function cancelHold(){
+  if(holdTimer){ clearInterval(holdTimer); holdTimer = null; holdBtn.style.opacity=''; holdBtn.setAttribute('aria-pressed','false'); }
+}
+
+/* Initialize: first pointerdown begins lock (gives gesture) */
+function onFirstPointer(e){
+  if(!started){
+    // unlock audio element/context on first gesture to maximize sound chances
+    unlockAudio().catch(()=>{});
+    startLockFlow();
+  }
+}
+window.addEventListener('pointerdown', onFirstPointer, {passive:false});
+
+/* Bind button hold */
+holdBtn.addEventListener('pointerdown', beginHold, {passive:false});
+window.addEventListener('pointerup', cancelHold, {passive:false});
+window.addEventListener('pointercancel', cancelHold, {passive:false});
+
+/* Clicking capture overlay should do nothing (block taps) */
+capture.addEventListener('pointerdown', function(e){ e.preventDefault(); e.stopPropagation(); }, {passive:false});
+
+/* Back button in reveal */
+backBtn.addEventListener('click', ()=> { location.reload(); });
+
+/* Keyboard Escape reveals (safety) */
+window.addEventListener('keydown', (e)=> { if(e.key === 'Escape') { clearInterval(countdownTimer); showReveal(); } });
+
+/* Safety: force end after 60s in case something stuck */
+setTimeout(()=> { if(started && remaining > 0){ remaining = 0; clearInterval(countdownTimer); triggerScare(); } }, 60000);
+
+updateDisplay();
+</script>
+
+</body>
+</html>
